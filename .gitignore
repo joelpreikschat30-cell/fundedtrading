@@ -4,3 +4,5 @@ __pycache__/
 # Regenerierbare Rohdaten (via dukascopy.py)
 validation/cache/
 validation/orchestrate.sh
+validation/data/
+validation/results/
