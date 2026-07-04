@@ -1,219 +1,176 @@
-# Ergebnisbericht — 3 Intraday-Futures-Strategien (Pine Script v6)
+# Ergebnisbericht — Master Session-Range-Strategie auf ECHTEN Daten
 
 **Stand:** 2026-07-04 · **Branch:** `claude/pine-v6-futures-strategies-symrq5`
+**Daten:** echte Dukascopy-Bars, 12 Monate (2025-07-01 – 2026-06-30),
+261 Handelstage je Instrument — XAUUSD (Gold) & USATECHIDXUSD (Nasdaq-100-CFD ≈ NQ).
 
 ---
 
-## ⚠️ Lies das zuerst: Was diese Zahlen sind — und was nicht
+## Was hier neu ist
 
-In dieser Umgebung stehen **keine echten historischen GC/NQ-Bars** zur Verfügung
-(kein TradingView-Chart, kein Datenfeed). Gemäß der Vorgabe *"erfinde keine
-Performance-Zahlen ohne tatsächliche Berechnung"* wurde die **komplette
-Validierungslogik lauffähig implementiert und ausgeführt** — auf **synthetischen
-OHLCV-Daten** (Regime-Switching-Prozess mit Vol-Clustering, Intraday-Saisonalität,
-~500 Handelstage ≈ 2 Jahre, Seed-fixiert und reproduzierbar).
+Auf deinen Wunsch: die drei alten, indikatorlastigen Strategien wurden ersetzt
+durch **eine** price-action-basierte **Master-Strategie** mit zwei Modi
+(NY-Opening-Range-**Breakout** nach Zarattini/Aziz + ICT-Asian-Range-**Sweep**),
+VWAP als einziger optionaler Filter — und validiert nicht mehr auf synthetischen,
+sondern auf **echten** von Dukascopy geladenen Bars (12 Monate, 1m→5m aggregiert).
 
-Das bedeutet:
-
-1. **Alle Zahlen unten sind Demonstration der Testmethodik**, keine Aussage über
-   echte Marktperformance. Synthetische Daten enthalten die Mikrostruktur-Effekte
-   nicht, aus denen diese Strategien ihren Edge ziehen wollen (Orderflow an
-   Swing-Levels, Session-Momentum, echte Mean-Reversion-Zonen).
-2. Der wissenschaftlich **korrekte** Befund: Auf Daten ohne ausbeutbare Struktur
-   müssen alle drei Strategien **nach Kosten negativ** sein — und genau das zeigt
-   die Pipeline. Eine Pipeline, die hier Gewinne anzeigen würde, wäre kaputt
-   (Lookahead/Repaint/Kosten-Fehler).
-3. Was die Pipeline **real validiert hat**: Regel-Implementierung, Anti-Repaint-
-   Logik, Position-Sizing, Kostenmodell, Daily-Loss-Limiter, Kill-Switch,
-   und die statistische Auswertungsmethodik (IS/OOS, Walk-Forward, Sensitivität,
-   Monte Carlo, Kosten-Stress, Regime-Split, Wilson-CI, Prop-Compliance).
-4. **Für echte Zahlen:** Pine-Skripte aus `strategies/` in TradingView auf
-   MGC/GC bzw. MNQ/NQ laden (mind. 1–2 Jahre 5m-Daten, Premium-Plan für
-   ausreichend Bars), Strategy-Tester-Export ziehen und die Trade-Liste durch
-   `validation/` schicken (Monte Carlo, Wilson-CI etc. funktionieren 1:1 auf
-   echten Trade-Listen).
-
-**Setup der Simulation:** $50.000 Konto, MGC ($10/Punkt, Tick 0,1) bzw.
-MNQ ($2/Punkt, Tick 0,25), Kommission $2,00–2,50/Kontrakt/Seite, Slippage 2–4
-Ticks auf Market-/Stop-Fills (Limit-TPs füllen ohne Slippage, wie in
-TradingView), SL-first-Annahme wenn SL und TP in derselben Bar liegen
-(konservativ), Entries nur auf Bar-Close.
+Getestet wurden 4 Kombinationen (2 Instrumente × 2 Modi), jeweils mit voller
+8-Test-Suite. Alle Zahlen unten sind auf echten Daten berechnet.
 
 ---
 
-## Strategie 1 — Gold 5m Trend-Pullback Engulfing (`strategy1_gold_trend_pullback_engulfing.pine`)
+## Kernergebnisse (12 Monate, Analyselauf ohne Kill-Switch, 0,5 % Risiko/Trade)
 
-### Kernkennzahlen (synthetisch, Analyselauf ohne Kill-Switch, 320 Trades)
+| Konfiguration | Trades | Win-Rate | PF | Expectancy | Net % | Max-DD | Sharpe |
+|---|---|---|---|---|---|---|---|
+| **Gold · Breakout (NY-ORB)** | 235 | 42,1 % | **1,11** | +0,07 R | **+5,7 %** | 8,8 % | 0,84 |
+| NAS · Breakout (NY-ORB) | 245 | 40,0 % | 1,01 | +0,01 R | +0,4 % | 9,0 % | −0,03 |
+| Gold · Sweep (Asia) | 179 | 39,1 % | 0,85 | −0,12 R | −8,3 % | 10,3 % | −0,87 |
+| NAS · Sweep (Asia) | 124 | 27,4 % | 0,52 | −0,47 R | −21,0 % | 21,4 % | −3,45 |
 
-| Kennzahl | Wert |
-|---|---|
-| Trades | 320 (Stichprobe ✅ ≥ 200) |
-| Win-Rate | 37,8 % (Wilson-95%-CI: 32,7–43,2 %) |
-| Profit Factor | 0,76 |
-| Expectancy | −0,19 R / Trade |
-| Max Drawdown | 21,5 % (ohne Limits) / **6,16 % mit Kill-Switch** |
-| Sharpe / Sortino | −1,39 / −2,01 |
-
-### IS/OOS (70/30, Mini-Grid auf IS optimiert, OOS unberührt)
-IS: PF 0,83, WR 39,4 % → OOS: PF 0,69, WR 33,7 %. **OOS deutlich schwächer als
-IS** — die Pipeline flaggt korrekt, dass selbst ein kleines 9-Punkte-Grid auf
-Rauschen overfittet. Genau dieses Muster (IS ok, OOS bricht ein) ist das
-Warnsignal, auf das man bei echten Daten achten muss.
-
-### Walk-Forward (6M Train / 2M Test, 8 Walks)
-Nur 2 von 8 Test-Fenstern positiv, kumuliertes OOS-Netto negativ. Kriterium für
-echte Daten: **≥ 60–70 % positive Walks** und stabile Parameterwahl über die
-Walks hinweg, sonst kein Go.
-
-### Parameter-Sensitivität (±20–30 %)
-Kein Vorzeichen-Flip über die Grids (PF bewegt sich glatt zwischen 0,63 und
-0,82) → die Regel-Logik ist **strukturell stabil, aber ohne Edge auf diesen
-Daten**. Auffällig: `rsi_lo=50` würgt fast alle Trades ab — die RSI-45–55-Zone
-ist der bindende Filter und wäre bei echten Daten der erste
-Curve-Fitting-Verdächtige.
-
-### Monte Carlo (1000 Reihenfolge-Permutationen)
-Median-MaxDD 20,5 %, P95 24,0 %, Worst 28,1 %, P(DD ≥ 6 %) = 100 % (erwartbar
-bei negativer Expectancy).
-
-### Kosten-Stress: 1x → PF 0,76 · 2x → 0,44 · 3x → 0,23
-Monotone Degradation wie erwartet; bei echten Daten gilt: **Edge muss 2x-Kosten
-überleben**, sonst kein Live-Einsatz.
-
-### Regime: Trend PF 0,81 (215 Tr.) vs. Range 0,68 (105 Tr.) — die Strategie ist
-wie designt trendabhängig; auf echten Daten Range-Phasen ggf. per ADX-Filter aussperren.
-
-### Prop-Compliance
-Ohne Limits: 21,5 % Max-DD (Konto-Bust). **Mit Limits: Kill-Switch greift bei
-6,16 %** — Daily-Limit wurde nie gerissen (schlechtester Tag 1,6 %).
-⚠️ Overshoot 6,16 % > 6,00 %: Der Check läuft auf Bar-Close; Prop-Firmen messen
-intrabar. **Praxisregel: Kill-Switch 1 %-Punkt UNTER der Firm-Grenze
-konfigurieren** (Firm 6 % → Input 5 %).
-
-### Einschätzung
-Implementierung produktionsreif, Risiko-Stack funktioniert nachweislich. Ob ein
-Edge existiert, ist **offen** bis zum Test auf echten Bars. Erst MGC London/NY-
-Session testen, RSI-Fenster und Engulfing-Modus (Body vs. strikt) als erste
-Robustheits-Checks.
+Auf den ersten Blick: Gold-Breakout sieht gut aus. **Die kritische Analyse
+zerlegt dieses Ergebnis aber — und das ist die eigentliche Botschaft.**
 
 ---
 
-## Strategie 2 — Gold 1m Mean-Reversion RSI + EMA200 (`strategy2_gold_meanrev_rsi_ema200.pine`)
+## 🚨 Die kritischen Befunde (warum „positiv" hier nicht „fundbar" heißt)
 
-### Kernkennzahlen (synthetisch, 1m-Interpretation, 315 Trades)
+### 1. Sweep-Modus hat auf keinem Instrument einen Edge
+Gold-Sweep PF 0,85, NAS-Sweep PF 0,52 (−21 %!). Beide werden nach Kosten noch
+schlechter (Gold-Sweep 2x-Kosten → PF 0,52). Walk-Forward NAS-Sweep 0/5 positiv.
+**→ ICT-Asian-Range-Sweep in dieser mechanischen Form: verwerfen.**
 
-| Kennzahl | Wert |
-|---|---|
-| Trades | 315 (Stichprobe ✅) |
-| Win-Rate | 11,1 % (Wilson-CI: 8,1–15,1 %) |
-| Profit Factor | 0,05 |
-| Expectancy | **−2,13 R / Trade** |
-| Max Drawdown | 67,2 % ohne Limits / 6,16 % mit Kill-Switch |
+### 2. Der Breakout-Gewinn kommt AUSSCHLIESSLICH aus Shorts — Longs verlieren
+Der wichtigste Fund. Richtungs-Split (o. Limits, 0,5 %):
 
-### 🚨 Der wichtigste Befund des gesamten Projekts — und er ist KEIN Synthetik-Artefakt:
+| | Long net | Long PF | Short net | Short PF |
+|---|---|---|---|---|
+| **Gold-Breakout** | **−$1.032** | 0,94 | **+$3.893** | 1,43 |
+| NAS-Breakout | −$1.652 | 0,89 | +$1.840 | 1,16 |
 
-**Die literale LuxAlgo-Regel (TP 10 Pips / SL 5 Pips) ist auf Futures
-arithmetisch tot.** Nachrechnung: SL = 0,5 Gold-Punkte = $5 Risiko/MGC-Kontrakt.
-Kosten pro Trade = 2×Kommission ($5) + 2×3 Ticks Slippage ($6) = **$11 — mehr als
-das 2-fache des geplanten Risikos** (daher Expectancy ≈ −2 R statt −1 R bei
-Losern). Selbst mit 1 Tick Slippage auf GC bleiben die Kosten ≈ 0,5 R. Das
-bestätigt exakt die Warnung aus der Recherche ("Stop trusting your strategy
-tester" für Scalping): Der Edge müsste absurd groß sein, um das zu bezahlen.
+Auf beiden Instrumenten sind die **Long-Breakouts defizitär**; der gesamte
+Netto-Gewinn stammt aus einer Handvoll Short-Trades (Gold: 95 Shorts).
+- **Entlastend:** Es ist *kein* naives Trend-Reiten — im +85 %-Gold-Bullenjahr
+  hätte Trend-Reiten über Longs verdient; hier verlieren die Longs.
+- **Belastend:** Ein so einseitiger Edge über *ein* 12-Monats-Fenster, getragen
+  von ~95 Trades, ist mit hoher Wahrscheinlichkeit eine **perioden- und
+  richtungsspezifische Anomalie**, kein stabiler, symmetrischer Edge.
 
-IS/OOS, Walk-Forward (0/8 positiv), Sensitivität (PF 0,01–0,08 über ALLE Grids —
-kein Parameter rettet die Kostenstruktur), Monte Carlo (Median-DD 67 %) und
-Kosten-Stress (2x → PF 0,00) bestätigen: strukturelles Problem, kein
-Parameter-Problem.
+### 3. Walk-Forward widerspricht dem Gesamt-Ergebnis
+Trotz positivem Gesamt- und IS/OOS-Split ist die rollierende Re-Optimierung schwach:
 
-### Einschätzung: **In der 10/5-Pip-Form NICHT für Futures-Prop-Konten geeignet.**
-Erforderliche Anpassungen (im Pine-Skript bereits vorbereitet):
-1. **Exit-Modus "ATR"** verwenden (SL = 1×ATR, TP = 2×SL) statt fixer Pips —
-   Stop-Distanz skaliert dann mit realer Vol und die Kosten fallen auf < 0,15 R.
-2. Alternativ Instrument wechseln: Spot-XAUUSD mit engem Spread (dafür war die
-   LuxAlgo-Regel gebaut), nicht GC/MGC.
-3. Trades/Tag niedrig halten (Kommissions-Drag) und nur London/NY handeln.
+| Konfig | IS→OOS (PF) | Walk-Forward positiv | WF OOS-net |
+|---|---|---|---|
+| Gold-Breakout | 1,04 → **1,58** | **2/5** | **−$1.326** |
+| NAS-Breakout | 1,05 → 1,06 | 2/5 | −$604 |
 
----
+Der 70/30-Holdout hält (gut, kein klassisches Overfitting auf dem Split), aber
+**nur 2 von 5 rollierenden Testfenstern sind positiv, mit negativer Summe.**
+Das ist das klassische Zeichen für einen **zeitlich instabilen Edge** — er lebt
+von wenigen Phasen, nicht von durchgehender Kante.
 
-## Strategie 3 — NQ 5m EMA + VWAP Momentum (`strategy3_nq_ema_vwap_momentum.pine`)
+### 4. NAS-Breakout ist brutto nur break-even und stirbt nach Kosten
+PF 1,01, Expectancy +0,01 R. Kosten-Stress: 1x PF 1,01 → **2x PF 0,96** → 3x 0,92.
+Der Edge existiert nur im Trend-/Hoch-Vol-Regime (Trend-Tage PF 1,12, Range-Tage
+0,56) und überlebt realistische Kosten nicht. **Nicht handelbar wie er ist.**
 
-### Kernkennzahlen (synthetisch, 377 Trades)
-
-| Kennzahl | Wert |
-|---|---|
-| Trades | 377 (Stichprobe ✅) |
-| Win-Rate | 36,1 % (Wilson-CI: 31,4–41,0 %) |
-| Profit Factor | 0,73 |
-| Expectancy | −0,31 R / Trade |
-| Max Drawdown | 27,0 % ohne Limits / **6,26 % mit Kill-Switch** |
-| Sharpe / Sortino | −1,93 / −2,81 |
-
-### IS/OOS: PF 0,86 → 0,52 (WR 41,4 % → 28,6 %) — starkes Overfitting-Signal des Grids.
-### Walk-Forward: 2/8 Walks positiv, OOS-Netto negativ.
-### Sensitivität: glatt, keine Flips; PF steigt monoton mit `atr_mult` (0,9→1,6:
-PF 0,57→0,82) — weitere Stops = weniger Noise-Stopouts. Auf echten Daten wäre
-`atr_mult ≥ 1,5` der erste Kandidat.
-### Monte Carlo: Median-DD 27,7 %, P95 31,3 %, P(DD ≥ 6 %) = 100 %.
-### Kosten-Stress: 1x PF 0,73 · 2x 0,45 · 3x 0,27.
-### Regime — das interessanteste Ergebnis: **Trend PF 0,94 (228 Tr.) vs. Range PF 0,46 (149 Tr.).**
-Die Strategie ist im Trend-Regime fast break-even trotz Kosten und stirbt in der
-Range. Ein Regime-Filter (z. B. ADX > 20 oder |EMA50−EMA200| > x·ATR auf 15m)
-ist die vielversprechendste Weiterentwicklung — noch vor jeder Parameter-Optimierung.
-
-### Prop-Compliance: Daily-Limit nie gerissen (worst day 1,75 %), Kill-Switch
-begrenzt auf 6,26 % (gleicher Bar-Close-Overshoot wie S1 → Puffer einplanen).
-
-### Einschätzung
-Sauber implementiert, Risiko-Stack greift. Momentum-Logik ist plausibel, braucht
-aber (a) echten NQ-RTH-Test, (b) Regime-Filter, (c) `atr_mult`-Bereich 1,25–1,6.
-MNQ zuerst, NQ erst ab nachgewiesener Live-Konsistenz.
+### 5. Robust ist nur Gold-Breakout — mit Sternchen
+Positiv: übersteht 2x Kosten (PF 1,04), parameter-robust (rr & Range-Filter
+durchgängig positiv, keine Vorzeichen-Flips), Monte-Carlo-Worst-DD ~12 %,
+OOS ≥ IS. Aber Punkte 2+3 (Short-only, WF 2/5) ziehen die Belastbarkeit stark
+nach unten.
 
 ---
 
-## Gesamtfazit & kritische Warnungen
+## Prop-Firm-Compliance & Sizing
 
-1. **Kein einziger Performance-Wert hier belegt einen Edge** — die Tests liefen
-   auf synthetischen Daten. Was belegt ist: die Strategien sind korrekt, ohne
-   Repaint/Lookahead implementiert, das Risikomanagement funktioniert mechanisch
-   (Kill-Switch kappte 21–67 % Drawdowns auf ~6,2 %), und die Auswertungs-
-   pipeline erkennt Overfitting (IS→OOS-Bruch), Kosten-Fragilität und
-   Regime-Abhängigkeit zuverlässig.
-2. **Curve-Fitting-Risiko:** Schon das Mini-Grid (9 Kombinationen) produzierte
-   IS-Ergebnisse, die OOS zusammenbrachen. Bei echten Daten: Grid klein halten,
-   OOS nur EINMAL anfassen, Walk-Forward als Pflicht, niemals "Parameter-Surfing"
-   bis das OOS schön aussieht.
-3. **Hindsight-Bias:** Die Regeln stammen aus veröffentlichten TradingView-
-   Skripten, deren gezeigte Equity-Kurven selbst überlebensverzerrt sind
-   (publiziert wird, was rückblickend funktionierte).
-4. **Kill-Switch-Puffer:** Bar-Close-Checks überschießen die Grenze um
-   0,15–0,3 %-Punkte. Limits im Skript 1–1,5 %-Punkte unter der Firm-Grenze setzen
-   (Firm 3 %/6 % → Inputs 2 %/4,5–5 %).
-5. **TradingView-Slippage-Semantik:** Limit-TPs füllen ohne Slippage — reale
-   Fills an schnellen Märkten sind schlechter. Der 2x-Kosten-Stress ist deshalb
-   das relevante Szenario, nicht 1x.
+- **Bei 0,5 % Risiko/Trade reißen ALLE vier Configs die 6 %-Trailing-DD-Grenze**
+  (Max-DD 8,8–21,4 % ohne Limits). Der eingebaute Kill-Switch kappt in der
+  Produktion korrekt bei ~6,0–6,2 % und schaltet die Strategie ab (killed=True
+  überall) — d. h. selbst die profitable Gold-Config wäre auf einem 6 %-Konto
+  abgeschaltet worden, bevor sie den Gewinn einfahren konnte.
+- **Risiko-Reduktion hilft, ist aber durch Kontrakt-Granularität begrenzt.**
+  Bei $50k-Konto und MGC ($10/Punkt) rundet feineres Sizing auf breiten Stops
+  häufig auf 0 Kontrakte:
 
-## Nächste Schritte (konkret)
+  | Gold-Breakout | Trades | PF | Max-DD |
+  |---|---|---|---|
+  | 0,50 % Risiko | 235 | 1,11 | 8,8 % |
+  | **0,35 % Risiko** | 171 | **1,26** | **4,9 %** ✅ |
+  | 0,25 % Risiko | 110 | 1,08 | 4,1 % |
 
-1. **Woche 0:** Skripte in TradingView laden (MGC 5m für S1, MGC/XAUUSD 1m für
-   S2 im ATR-Modus, MNQ 5m für S3), Bar-Magnifier aktivieren falls Premium,
-   2 Jahre Backtest, Trade-Listen exportieren.
-2. **Woche 0–1:** Exportierte Trades durch `validation/` schicken (MC, Wilson,
-   Kosten-Stress auf echten Trades). Go-Kriterien: ≥ 200 Trades, PF ≥ 1,3 nach
-   2x-Kosten, OOS-PF ≥ 0,75×IS-PF, ≥ 60 % positive Walk-Forward-Fenster,
-   MC-P95-DD < 2/3 der Prop-Grenze.
-3. **Woche 1–7 (nur bei Go):** 4–6 Wochen Forward-Test auf Demo/Sim-Funded
-   (Tradovate/NinjaTrader-Sim), 1 Kontrakt MGC bzw. MNQ, nur Haupt-Session.
-   Slippage-Ist vs. -Annahme protokollieren.
-4. **Danach:** Eval-Account mit halber Risikogröße (0,25 %/Trade), erst nach
-   30+ Live-Trades ohne Limit-Verletzung auf Zielgröße.
+  Bei 0,35 % passt Gold-Breakout unter 6 % DD und bleibt profitabel — allerdings
+  fallen dabei ~60 Trades weg (nur weil sie auf 0 Kontrakte runden), was die
+  Statistik dünner macht. Sauberes 0,25–0,35 %-Sizing bräuchte ein größeres
+  Konto oder feinere Kontrakte.
+- Tägliches Loss-Limit (3 %) wurde in keiner Config je an einem einzelnen Tag
+  gerissen (schlechtester Tag ≤ 1,3 %) — die Strategien sind intraday gut
+  gestreut; das Risiko ist der **kumulative Trailing-Drawdown**, nicht der Tag.
+
+---
+
+## Klare Einschätzung: fundbar?
+
+**Nein — keine der vier Konfigurationen ist in dieser Form für ein striktes
+Funded-/Prop-Konto geeignet.** Begründung:
+- Sweep-Modus: kein Edge (verwerfen).
+- NAS-Breakout: break-even, stirbt nach Kosten.
+- Gold-Breakout: bester Kandidat, aber der Gewinn ist (a) einseitig auf Shorts,
+  (b) auf ~95 Trades und ein einzelnes 12-Monats-Fenster konzentriert und
+  (c) walk-forward-instabil. Das reicht nicht für echtes Kapital mit 6 %-Limit.
+
+Der Test hat sich also **methodisch bewährt**: Er hat auf echten Daten Struktur
+gefunden (anders als auf synthetischen), aber die kritischen Zerlegungen
+(Richtungs-Split, Walk-Forward, Kosten-Stress) entlarven das Headline-Ergebnis
+als fragil statt fundbar. Genau dafür sind diese Tests da.
+
+---
+
+## Was müsste angepasst werden (konkrete nächste Schritte)
+
+1. **Regime-Filter einbauen** — der stärkste Hebel. Auf beiden Breakout-Configs
+   liegt der Edge fast vollständig in Trend-/Hoch-Vol-Tagen (Gold Trend-Tag
+   PF 1,27 vs Range-Tag 0,68; NAS 1,12 vs 0,56). Nur an Tagen mit hohem
+   Tages-ATR / klarer Vortagsrichtung handeln. (Der Range-Größenfilter am
+   Tages-ATR ist bereits im Code — als Tagestyp-Filter ausbauen.)
+2. **Die Short-only-Asymmetrie untersuchen**, statt sie zu glauben. Ist der
+   Long-Verlust ein Kosteneffekt (breitere Stops?), ein Session-Timing-Problem,
+   oder echt? Wenn Longs strukturell nicht funktionieren → ggf. nur Shorts
+   handeln, aber erst nach Bestätigung auf einem zweiten Zeitraum.
+3. **Auf einem ÄLTEREN/LÄNGEREN Fenster gegentesten**, das Gold-Range- und
+   -Bärenphasen enthält (z. B. 2022–2024). Das aktuelle Fenster ist ein extremes
+   Gold-Bullenjahr; ein Edge muss auch außerhalb überleben.
+4. **Kosten konservativ halten:** Alle Live-Entscheidungen an der 2x-Kosten-Zeile
+   messen (Limit-TPs füllen im Backtest ohne Slippage — real schlechter).
+5. **Forward-Test** (nur falls 1–3 bestehen): 4–6 Wochen Sim-Funded auf MGC
+   (Gold-Breakout, Regime-gefiltert, 0,35 % Risiko), NY-Session. NAS/MNQ erst
+   nachziehen, wenn dort ein Edge nachweisbar ist.
+6. **Für die finale Freigabe** echte CME-Futures gegenchecken (Databento),
+   da hier XAUUSD-Spot bzw. NAS100-CFD als Näherung dienten.
+
+---
+
+## Grenzen dieses Tests (Transparenz)
+
+- **Instrument-Näherung:** XAUUSD-Spot ≈ GC/MGC (Preisbewegung quasi identisch,
+  Kontraktspezifikation leicht anders); NAS100-CFD ≈ NQ/MNQ (Index vs. Future,
+  minimale Abweichungen, kein echter Kontraktrollover/Verfall).
+- **Ein 12-Monats-Fenster** — statistisch grenzwertig (Session-Setups = ~1/Tag).
+  Gold-Sweep/NAS-Sweep haben < 200 Trades (Wilson-CI entsprechend breit).
+- **Fill-Annahmen:** SL-first konservativ, Slippage auf Market/Stop, Limit-TP
+  ohne Slippage (wie TradingView) — reale Fills an schnellen Breaks sind schlechter.
+- **Backtest ≠ Live:** Latenz, Teilfills, Spread-Ausweitung an News nicht
+  abgebildet. Kein Ersatz für Forward-Test.
+
+---
 
 ## Dateien
 
 | Pfad | Inhalt |
 |---|---|
-| `strategies/strategy1_gold_trend_pullback_engulfing.pine` | S1, Pine v6, produktionsreif |
-| `strategies/strategy2_gold_meanrev_rsi_ema200.pine` | S2, Pine v6 (Pip- & ATR-Exit-Modus) |
-| `strategies/strategy3_nq_ema_vwap_momentum.pine` | S3, Pine v6 |
-| `validation/engine.py` | Simulations-/Metrik-Engine (Regeln 1:1 aus Pine) |
-| `validation/run_validation.py` | Alle 8 Tests, reproduzierbar (Seed 42) |
-| `validation/results/validation_results.json` | Vollständige Roh-Ergebnisse |
+| `strategies/master_session_range.pine` | Master-Strategie, Pine v6 (Breakout + Sweep) |
+| `validation/dukascopy.py` | Echtdaten-Downloader (freie .bi5-Tickdaten → 1m-Bars) |
+| `validation/master_engine.py` | Resampling, Signal-Logik (1:1 zu Pine), Simulator |
+| `validation/run_master.py` | 8-Test-Suite auf echten 12-Monats-Bars |
+| `validation/summarize.py` | Konsolen-Übersicht der Ergebnisse |
+| `validation/results/master_results.json` | Vollständige Roh-Ergebnisse |
