@@ -1,0 +1,302 @@
+//@version=6
+// =============================================================================
+//  MASTER STRATEGY — Session Range: Breakout & Sweep (Gold + Nasdaq)
+// =============================================================================
+//  EIN price-action-Framework, das per Konfiguration zwei dokumentierte
+//  Session-Edges abdeckt — funktioniert auf Gold (XAUUSD/GC/MGC) UND
+//  Nasdaq (NAS100/NQ/MNQ). Keine laggenden Indikatoren (kein EMA/RSI);
+//  einziger optionaler Indikator ist VWAP.
+//
+//  ── MODUS A: BREAKOUT (New York Opening Range Breakout) ──────────────────
+//  Quelle: Zarattini & Aziz (2024), "A Profitable Day Trading Strategy For
+//  The U.S. Equity Market" — 5-Min-Opening-Range war die beste Range-Dauer.
+//  [B1] Referenz-Range = Hoch/Tief eines Fensters ab Session-Open (z.B.
+//       erste 5-15 min der NY-RTH 13:30 UTC).
+//  [B2] Entry: 5m-Close JENSEITS der Range-Grenze (long über Range-Hoch,
+//       short unter Range-Tief) im Handelsfenster.
+//  [B3] Stop: Gegenseite der Opening-Range (long: Range-Tief). Alternativ ATR.
+//  [B4] Ziel: R-Vielfaches der Stop-Distanz (Zarattini nutzte 10R + EOD;
+//       hier konservativ konfigurierbar, default 2R) — sonst EOD-Flat.
+//
+//  ── MODUS B: SWEEP (ICT Asian Range / Judas Swing Reversal) ──────────────
+//  Quelle: ICT Asian Range / London Judas Swing (mehrere Quellen).
+//  [S1] Referenz-Range = Asia-Session-Konsolidierung (z.B. 00:00-06:00 UTC).
+//  [S2] Sweep: Bar durchsticht ein Range-Extrem (Docht über Range-Hoch bzw.
+//       unter Range-Tief), SCHLIESST aber WIEDER INNERHALB der Range
+//       (= gescheiterter Ausbruch / Liquiditäts-Sweep / Stop-Hunt).
+//  [S3] Entry: Fade in Gegenrichtung des Sweeps auf Close-Bestätigung
+//       (Sweep der Tiefs -> Long; Sweep der Hochs -> Short).
+//  [S4] Stop: knapp jenseits des Sweep-Dochts (+ ATR-Puffer).
+//  [S5] Ziel: Gegenseite der Range ODER R-Vielfaches.
+//
+//  VWAP-Konfluenz [V]: optional. Breakout nur in Richtung VWAP; Sweep-Fade
+//  nur wenn Ziel Richtung VWAP liegt (Reversal zum Mittelwert).
+//
+//  RISIKO/PROP: %-Equity-Sizing, Daily-Loss-Limiter, Max-DD-Kill-Switch,
+//  Max-Trades/Tag, EOD-Flat, ein Setup je Richtung/Tag. Anti-Repaint:
+//  Entries nur auf barstate.isconfirmed, process_orders_on_close=true.
+//
+//  ── PRESETS (siehe Inputs) ───────────────────────────────────────────────
+//   Gold-Asia-Sweep:  Modus=Sweep,   Range 0000-0600, Trade 0600-1200 UTC
+//   Index-NY-ORB:     Modus=Breakout,Range 1330-1345, Trade 1345-2000 UTC
+// =============================================================================
+strategy("Master Session Range: Breakout & Sweep [v6]",
+     shorttitle            = "MASTER SR",
+     overlay               = true,
+     initial_capital       = 50000,
+     currency              = currency.USD,
+     default_qty_type      = strategy.fixed,
+     default_qty_value     = 1,
+     pyramiding            = 0,
+     commission_type       = strategy.commission.cash_per_contract,
+     commission_value      = 2.5,
+     slippage              = 2,
+     margin_long           = 5,
+     margin_short          = 5,
+     process_orders_on_close = true,
+     calc_on_every_tick    = false,
+     use_bar_magnifier     = false)
+
+// ---------------------------------------------------------------------------
+// INPUTS
+// ---------------------------------------------------------------------------
+grpMode = "Modus & Sessions"
+mode      = input.string("Sweep", "Handelsmodus", options = ["Breakout", "Sweep", "Both"], group = grpMode, tooltip = "Breakout = NY Opening Range Breakout (Index). Sweep = ICT Asian Range Reversal (Gold). Both = beide gleichzeitig.")
+rangeSess = input.session("0000-0600", "Range-Fenster (Referenz-Range)", group = grpMode, tooltip = "[B1]/[S1] Hier werden Range-Hoch/-Tief gebildet. Gold-Asia: 0000-0600. Index-NY-ORB: 1330-1345.")
+tradeSess = input.session("0600-1200", "Handels-Fenster (Entries erlaubt)", group = grpMode, tooltip = "[B2]/[S3] Nur hier werden Entries ausgelöst. Gold: 0600-1200. Index: 1345-2000.")
+tz        = input.string("UTC", "Zeitzone", group = grpMode, tooltip = "Session-Zeiten beziehen sich auf diese Zone. Dukascopy-Echtdaten sind UTC.")
+
+grpEntry = "Entry / Price Action"
+// Range-Größenfilter in Einheiten des TAGES-ATR (korrekt skaliert — eine
+// mehrstündige Session-Range ist ein Vielfaches eines 5m-ATR, daher NICHT
+// gegen den 5m-ATR filtern). Asia-6h ~0.3-0.6 Tages-ATR; NY-ORB-15m ~0.03-0.15.
+minRangeAtr = input.float(0.15, "Min. Range-Größe (x Tages-ATR)", step = 0.05, minval = 0.0, group = grpEntry, tooltip = "Filtert Tage mit zu enger (illiquider) Range aus. 0 = aus. NY-ORB: ~0.03.")
+maxRangeAtr = input.float(1.2,  "Max. Range-Größe (x Tages-ATR)", step = 0.1, minval = 0.1, group = grpEntry, tooltip = "Filtert news-getriebene Übergröß-Ranges aus. NY-ORB: ~0.4.")
+useVwap     = input.bool(true, "VWAP-Konfluenz [V]", group = grpEntry, tooltip = "Breakout: nur in VWAP-Richtung. Sweep: nur wenn Reversal Richtung VWAP zeigt.")
+oneSetupDir = input.bool(true, "Max. 1 Setup je Richtung/Tag", group = grpEntry)
+
+grpExit = "Stops & Targets"
+stopMode  = input.string("Structure", "Stop-Modus", options = ["Structure", "ATR"], group = grpExit, tooltip = "[B3]/[S4] Structure: Breakout->Gegenseite der Range, Sweep->jenseits Sweep-Docht. ATR: k*ATR.")
+atrLen    = input.int(14, "ATR Länge", minval = 1, group = grpExit)
+atrStopK  = input.float(1.25, "ATR-Stop k", step = 0.05, minval = 0.25, group = grpExit)
+stopBufAtr = input.float(0.1, "Stop-Puffer (x ATR)", step = 0.05, minval = 0.0, group = grpExit)
+targetMode = input.string("R-Multiple", "Ziel-Modus", options = ["R-Multiple", "OppositeRange"], group = grpExit, tooltip = "[B4]/[S5] R-Multiple: TP = RR*SL. OppositeRange: TP = Gegenseite der Range.")
+rrTarget  = input.float(2.0, "RR-Ziel", step = 0.1, minval = 0.5, group = grpExit)
+
+grpRisk = "Risiko & Prop-Firm-Limits"
+riskPct      = input.float(0.5, "Risiko pro Trade (% Equity)", step = 0.05, minval = 0.05, maxval = 2.0, group = grpRisk, tooltip = "Kontrakte = RisikoUSD / (SL-Distanz x Punktwert).")
+maxContracts = input.int(20, "Max. Kontrakte", minval = 1, group = grpRisk)
+maxTradesDay = input.int(3,  "Max. Trades pro Tag", minval = 1, group = grpRisk)
+dailyLossPct = input.float(3.0, "Daily-Loss-Limit (%)", step = 0.25, minval = 0.5, group = grpRisk)
+maxDdPct     = input.float(6.0, "Max-Drawdown-Kill-Switch (%)", step = 0.25, minval = 1.0, group = grpRisk, tooltip = "Puffer einplanen: 1 Punkt unter der Firm-Grenze (Bar-Close-Check überschießt intrabar minimal).")
+showDash     = input.bool(true, "Dashboard anzeigen", group = grpRisk)
+
+// ---------------------------------------------------------------------------
+// v6 UDT + METHODS: Risiko-/Tages-State
+// ---------------------------------------------------------------------------
+type RiskState
+    float dayStartEquity = na
+    float peakEquity     = na
+    int   tradesToday    = 0
+    bool  dayHalted      = false
+    bool  killed         = false
+    bool  tookLong       = false   // Setup je Richtung heute schon genommen?
+    bool  tookShort      = false
+
+method newDay(RiskState self) =>
+    self.dayStartEquity := strategy.equity
+    self.tradesToday    := 0
+    self.dayHalted      := false
+    self.tookLong       := false
+    self.tookShort      := false
+
+method dailyDrawdownPct(RiskState self) =>
+    na(self.dayStartEquity) or self.dayStartEquity <= 0 ? 0.0 :
+     100.0 * (self.dayStartEquity - strategy.equity) / self.dayStartEquity
+
+method totalDrawdownPct(RiskState self) =>
+    na(self.peakEquity) or self.peakEquity <= 0 ? 0.0 :
+     100.0 * (self.peakEquity - strategy.equity) / self.peakEquity
+
+method remainingDayBudget(RiskState self) =>
+    na(self.dayStartEquity) ? 0.0 :
+     math.max(0.0, self.dayStartEquity * dailyLossPct / 100.0 - (self.dayStartEquity - strategy.equity))
+
+var RiskState rs = RiskState.new()
+
+// ---------------------------------------------------------------------------
+// SESSION-STATE & RANGE-BILDUNG
+// ---------------------------------------------------------------------------
+inRange = not na(time(timeframe.period, rangeSess, tz))
+inTrade = not na(time(timeframe.period, tradeSess, tz))
+atr = ta.atr(atrLen)                     // TF-ATR (für Stops)
+// Tages-ATR als korrekt skalierter Maßstab für die Range-Größe.
+// [1] = letzter ABGESCHLOSSENER Tageswert (kein Lookahead/Repaint).
+atrD = request.security(syminfo.tickerid, "D", ta.atr(atrLen)[1], lookahead = barmerge.lookahead_off)
+vwap = ta.vwap(hlc3)
+
+// Range-Hoch/-Tief NUR während des Range-Fensters aufbauen; beim ersten
+// Range-Bar des Tages zurücksetzen. Werte "einfrieren", sobald das
+// Handelsfenster beginnt (Referenz-Range steht dann fest).
+var float rHigh = na
+var float rLow  = na
+var bool  rReady = false      // Range fertig gebildet?
+
+rangeStart = inRange and not inRange[1]
+if rangeStart
+    rHigh := high
+    rLow  := low
+    rReady := false
+else if inRange
+    rHigh := math.max(rHigh, high)
+    rLow  := math.min(rLow, low)
+
+// Übergang Range -> Handel: Range fixieren
+if inTrade and not inTrade[1]
+    rReady := na(rHigh) or na(rLow) ? false : true
+
+rangeSize = (na(rHigh) or na(rLow)) ? na : rHigh - rLow
+rangeOk = rReady and not na(rangeSize) and not na(atrD) and
+     rangeSize >= minRangeAtr * atrD and rangeSize <= maxRangeAtr * atrD
+
+// ---------------------------------------------------------------------------
+// DAILY-LOSS-LIMITER + KILL-SWITCH
+// ---------------------------------------------------------------------------
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    rs.newDay()
+    // neuer Tag -> Range-State neutralisieren, bis Range-Fenster neu startet
+    rReady := false
+    rHigh := na
+    rLow := na
+if na(rs.peakEquity) or strategy.equity > rs.peakEquity
+    rs.peakEquity := strategy.equity
+
+if not rs.killed and rs.totalDrawdownPct() >= maxDdPct
+    rs.killed := true
+    strategy.close_all(comment = "KILL max-DD", immediately = true)
+    strategy.cancel_all()
+
+if not rs.dayHalted and rs.dailyDrawdownPct() >= dailyLossPct
+    rs.dayHalted := true
+    strategy.close_all(comment = "HALT daily-loss", immediately = true)
+    strategy.cancel_all()
+
+allowNewTrades = not rs.killed and not rs.dayHalted and inTrade and
+     rangeOk and rs.tradesToday < maxTradesDay and strategy.position_size == 0
+
+// ---------------------------------------------------------------------------
+// SIGNALE — reine Price Action
+// ---------------------------------------------------------------------------
+doBreak = mode == "Breakout" or mode == "Both"
+doSweep = mode == "Sweep"    or mode == "Both"
+
+// [B2] BREAKOUT: 5m-Close jenseits der Range-Grenze
+breakLong  = doBreak and close > rHigh and close[1] <= rHigh
+breakShort = doBreak and close < rLow  and close[1] >= rLow
+
+// [S2]/[S3] SWEEP: Docht durchsticht Extrem, Close zurück in der Range -> Fade
+sweepLong  = doSweep and low  < rLow  and close > rLow      // Tiefs gesweept -> Long
+sweepShort = doSweep and high > rHigh and close < rHigh     // Hochs gesweept -> Short
+
+// [V] VWAP-Konfluenz — RICHTUNG modusabhängig:
+//  Breakout (Momentum): long nur wenn close > VWAP (Trend-Rückhalt).
+//  Sweep (Reversal):    long nur wenn close < VWAP (Ziel = Rückkehr zum Mittelwert).
+brkLong  = breakLong  and (not useVwap or close > vwap)
+brkShort = breakShort and (not useVwap or close < vwap)
+swpLong  = sweepLong  and (not useVwap or close < vwap)
+swpShort = sweepShort and (not useVwap or close > vwap)
+
+// Setup-je-Richtung-Limit
+longAllowed  = not oneSetupDir or not rs.tookLong
+shortAllowed = not oneSetupDir or not rs.tookShort
+
+goLong  = allowNewTrades and longAllowed  and (brkLong  or swpLong)
+goShort = allowNewTrades and shortAllowed and (brkShort or swpShort)
+
+// ---------------------------------------------------------------------------
+// STOP-BERECHNUNG
+// ---------------------------------------------------------------------------
+// Long-Stop
+longStop() =>
+    if stopMode == "ATR"
+        close - atrStopK * atr
+    else if breakLong
+        rLow - stopBufAtr * atr          // [B3] Gegenseite der Range
+    else
+        low - stopBufAtr * atr           // [S4] jenseits Sweep-Docht
+shortStop() =>
+    if stopMode == "ATR"
+        close + atrStopK * atr
+    else if breakShort
+        rHigh + stopBufAtr * atr
+    else
+        high + stopBufAtr * atr
+
+calcQty(float slDist) =>
+    riskUsd = strategy.equity * riskPct / 100.0
+    perCon  = slDist * syminfo.pointvalue
+    q = perCon > 0 ? math.floor(riskUsd / perCon) : 0
+    math.min(math.max(q, 0), maxContracts)
+
+// ---------------------------------------------------------------------------
+// ENTRIES — nur bestätigte Bars
+// ---------------------------------------------------------------------------
+if goLong and barstate.isconfirmed
+    sl = longStop()
+    slDist = close - sl
+    if slDist > 0
+        tp = targetMode == "OppositeRange" ? math.max(rHigh, close + slDist) : close + rrTarget * slDist
+        q = calcQty(slDist)
+        if q >= 1
+            strategy.entry("Long", strategy.long, qty = q)
+            strategy.exit("LongX", "Long", stop = sl, limit = tp)
+            rs.tradesToday += 1
+            rs.tookLong := true
+
+if goShort and barstate.isconfirmed
+    sl = shortStop()
+    slDist = sl - close
+    if slDist > 0
+        tp = targetMode == "OppositeRange" ? math.min(rLow, close - slDist) : close - rrTarget * slDist
+        q = calcQty(slDist)
+        if q >= 1
+            strategy.entry("Short", strategy.short, qty = q)
+            strategy.exit("ShortX", "Short", stop = sl, limit = tp)
+            rs.tradesToday += 1
+            rs.tookShort := true
+
+// EOD-Flat: außerhalb des Handelsfensters keine offene Position (Intraday)
+if not inTrade and strategy.position_size != 0 and barstate.isconfirmed
+    strategy.close_all(comment = "EOD flat")
+
+// ---------------------------------------------------------------------------
+// DASHBOARD
+// ---------------------------------------------------------------------------
+var table dash = table.new(position.top_right, 2, 8, bgcolor = color.new(color.black, 15), border_width = 1, border_color = color.new(color.gray, 60))
+cell(int r, string k, string v, color c) =>
+    table.cell(dash, 0, r, k, text_color = color.white, text_size = size.small, text_halign = text.align_left)
+    table.cell(dash, 1, r, v, text_color = c, text_size = size.small, text_halign = text.align_right)
+
+if showDash and barstate.islast
+    winRate = strategy.closedtrades > 0 ? 100.0 * strategy.wintrades / strategy.closedtrades : na
+    pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    cell(0, "Master SR (" + mode + ")", rs.killed ? "KILLED" : rs.dayHalted ? "DAY HALT" : "AKTIV", rs.killed ? color.red : rs.dayHalted ? color.orange : color.lime)
+    cell(1, "Trades (gesamt)", str.tostring(strategy.closedtrades), color.white)
+    cell(2, "Win-Rate", na(winRate) ? "n/a" : str.tostring(winRate, "#.1") + "%", color.white)
+    cell(3, "Profit Factor", na(pf) ? "n/a" : str.tostring(pf, "#.##"), na(pf) ? color.gray : pf >= 1 ? color.lime : color.red)
+    cell(4, "Tages-DD", str.tostring(rs.dailyDrawdownPct(), "#.##") + "%", rs.dailyDrawdownPct() > dailyLossPct * 0.66 ? color.orange : color.white)
+    cell(5, "Rest-Tagesbudget", "$" + str.tostring(rs.remainingDayBudget(), "#"), color.white)
+    cell(6, "Gesamt-DD (Peak)", str.tostring(rs.totalDrawdownPct(), "#.##") + "%", rs.totalDrawdownPct() > maxDdPct * 0.66 ? color.orange : color.white)
+    cell(7, "Trades heute", str.tostring(rs.tradesToday) + " / " + str.tostring(maxTradesDay), color.white)
+
+// ---------------------------------------------------------------------------
+// VISUALS
+// ---------------------------------------------------------------------------
+plot(rReady ? rHigh : na, "Range Hoch", color = color.new(color.aqua, 0), style = plot.style_linebr, linewidth = 2)
+plot(rReady ? rLow  : na, "Range Tief", color = color.new(color.fuchsia, 0), style = plot.style_linebr, linewidth = 2)
+plot(useVwap ? vwap : na, "VWAP", color = color.new(color.orange, 20), linewidth = 1)
+bgcolor(inRange ? color.new(color.blue, 92) : na, title = "Range-Fenster")
+plotshape(goLong  and barstate.isconfirmed, "Long",  shape.triangleup,   location.belowbar, color.lime, size = size.small)
+plotshape(goShort and barstate.isconfirmed, "Short", shape.triangledown, location.abovebar, color.red,  size = size.small)
+bgcolor(rs.killed ? color.new(color.red, 85) : rs.dayHalted ? color.new(color.orange, 88) : na)
