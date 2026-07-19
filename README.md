@@ -11,11 +11,24 @@ Action, VWAP als einziger optionaler Konfluenz-Filter.
 ## NEU: Snipe-Points-Indikator (`indicators/snipe_points.pine`)
 
 Pine-v6-**Indikator** (nicht Strategie) für seltene, hoch-asymmetrische
-1m-Reversal-Setups auf MGC/SIL/MNQ/MES: Multi-Session-Engine (Asia, London-KZ,
-NY-Pre, NY-IB, PM/London-Close + 3 LBMA-Fix-Fenster), Liquidity-Sweep-Detection
-(Asia/London/Vortages-H-L/Rolling-24h), MSS + Displacement-Filter, Alerts.
-Session-1-Build — Stop/Target-Engine, RR-Gate (min. 1:5), Expansion-Score, SMT,
-Turtle Soup folgen. Repo-Abgleich & Modulplan: [docs/SNIPE_ANALYSE.md](docs/SNIPE_ANALYSE.md)
+1m-Reversal-Setups auf MGC/SIL/MNQ/MES. Vollständige Signal-Pipeline:
+
+1. **Multi-Session-Engine** — Asia, London-KZ, NY-Pre, NY-IB, PM/London-Close
+   + 3 LBMA-Fix-Fenster (in `Europe/London`, DST-sicher); Boxen im Chart.
+2. **Sweep-Detection** gegen Asia-/London-/Vortages-H-L + Rolling-24h-Range,
+   mit Min-Penetration in Ticks.
+3. **MSS + Displacement** — Close jenseits Gegen-Swing + Körper > k×Ø-Körper.
+4. **Stop-Engine, 3 Methoden** — Wick+Ticks · ATR(1m,n)×k · FVG-Rand.
+5. **RR-Gate** — Signal nur wenn RR zum Ziel (Gegenseite Range / PDH-PDL)
+   ≥ Mindest-RR (Default 1:5).
+6. **Range-Expansion-Score** — gewichtet aus ATR-Regime-Perzentil, Narrow-IB,
+   Overnight-Range, Inside-Day; Cutoff kalibrierbar für ~1 Signal/Woche/Symbol.
+7. **Optionale Filter** — SMT-Divergenz (MNQ↔MES, MGC↔SIL), VWAP-Rejection,
+   Kalender-Filter (manuelle Datumsliste, block/allow).
+8. **Turtle Soup** — separates Modul (N-Tage-Extrem-Fehlausbruch).
+
+Alerts für jedes Signal, Dashboard mit Score-Transparenz + Signalzählern.
+Repo-Abgleich & Modulplan: [docs/SNIPE_ANALYSE.md](docs/SNIPE_ANALYSE.md)
 
 ## Die Strategie (`strategies/master_session_range.pine`)
 

@@ -41,5 +41,6 @@ Stop/Target-Engine, Kalender-Filter, Range-Expansion-Filter).
 
 ## 4. Arbeitsstand
 
-- **Session 1 (erledigt):** Multi-Session-Engine + Boxen, Sweep-Detection (Asia/London/PDH-PDL/Rolling), MSS + Displacement, Sweep-/Signal-Marker, Basis-Alerts — Testversion ohne Stop/Target/RR-Gate zur visuellen Kontrolle.
-- **Session 2 (offen):** Stop/Target-Engine (3 Methoden inkl. FVG), RR-Gate, Expansion-Score, SMT, VWAP-Rejection, Turtle Soup, Kalender-Filter, finale Alerts/Labels, Frequenz-Sichttest.
+- **Session 1 (erledigt):** Multi-Session-Engine + Boxen, Sweep-Detection (Asia/London/PDH-PDL/Rolling), MSS + Displacement, Sweep-/Signal-Marker, Basis-Alerts.
+- **Session 2 (erledigt):** Stop/Target-Engine (Wick+Ticks · ATR · FVG-Rand), RR-Gate (Default 1:5), Range-Expansion-Score (ATR-Regime-Perzentil, Narrow-IB, Overnight-Range, Inside-Day; gewichtet + Cutoff), SMT-Divergenz, VWAP-Rejection, Kalender-Filter, Turtle-Soup-Modul, Entry/SL/TP-Linien + Labels, Dashboard, finale Alerts.
+- **Offen (Kalibrierung durch dich):** Score-Cutoff, Min-RR, Displacement-Faktor und Session-Toggles pro Symbol im Backtest auf ~1 Signal/Woche einstellen. Für MGC/SIL fehlende HOD/LOD-Timings über die `validation/`-Pipeline (`dukascopy.py XAGUSD …`) ermitteln.
