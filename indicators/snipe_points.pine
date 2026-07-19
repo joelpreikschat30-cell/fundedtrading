@@ -1,0 +1,315 @@
+//@version=6
+// =============================================================================
+//  SNIPE POINTS — Session-Sweep-Reversal-Indikator (MGC / SIL / MNQ / MES)
+//  ── SESSION-1-BUILD: Session-Engine · Sweep-Detection · MSS/Displacement ──
+// =============================================================================
+//  Zweck: seltene, hoch-asymmetrische Reversal-Setups auf dem 1m-Chart finden.
+//  Ablauf je Signal:
+//    1. Referenz-Level (Asia H/L, London-KZ H/L, Vortages-H/L, Rolling-24h)
+//    2. SWEEP: Docht durchsticht Level (>= min. Ticks), Close zurück dahinter
+//    3. MSS:   innerhalb N Bars Close jenseits des letzten Gegen-Swings
+//    4. DISPLACEMENT: MSS-Kerze mit Körper > k x Ø-Körper (opt. Strukturlevel)
+//  → Marker + Alert. Stop/Target/RR-Gate/Score folgen in Session 2 (s. unten).
+//
+//  ZEITBASIS: Alle Fenster in UTC (Input änderbar). Ausnahme LBMA-Fixes:
+//  in Europe/London definiert, da die Fixes an London-LOKALZEIT hängen und
+//  das Fenster so die Sommer-/Winterzeit automatisch mitmacht.
+//    Asia Range        00:00–06:00 UTC (19:00–01:00 EST) — Pool, kein Trading
+//    London Open KZ    07:00–10:00 UTC (02:00–05:00 EST) — Judas-Swing-Fenster
+//    NY Pre-Market     12:00–13:30 UTC (07:00–08:30 EST)
+//    NY Open / IB KZ   13:30–15:30 UTC (08:30–10:30 EST) — 24,2% HODs / 26,5% LODs
+//    PM / London Close 17:00–20:00 UTC (13:00–16:00 ET)  — 35% aller HODs
+//    LBMA Gold AM-Fix  10:30 London  ≈ 09:30 UTC (Sommer) — Fenster ±15 min
+//    LBMA Silver-Fix   12:00 London  ≈ 11:00 UTC (Sommer) — Fenster ±15 min
+//    LBMA Gold PM-Fix  15:00 London  ≈ 14:00 UTC (Sommer) — Fenster ±15 min
+//
+//  ANTI-REPAINT: State-Updates & Alerts nur auf barstate.isconfirmed;
+//  HTF-Requests mit lookahead_off + [1]-Offset (Muster aus master_session_range).
+//
+//  WIEDERVERWENDET aus strategies/master_session_range.pine:
+//  Range-Tracking-Muster (Start-Reset/Freeze), Sweep-Kernbedingung,
+//  Daily-request.security-Muster. Neu: Multi-Session-Architektur, MSS,
+//  Displacement, LBMA-Fenster, Rolling-24h-Modus, Alerts.
+// =============================================================================
+indicator("Snipe Points — Sweep Reversals [S1]", shorttitle = "SNIPE S1",
+     overlay = true, max_boxes_count = 500, max_labels_count = 500,
+     max_lines_count = 500)
+
+// ---------------------------------------------------------------------------
+// INPUTS
+// ---------------------------------------------------------------------------
+grpTz = "Zeitbasis"
+tzMain = input.string("UTC", "Zeitzone Haupt-Sessions", group = grpTz, tooltip = "Referenzzone für Asia/London/NY/PM-Fenster. Default UTC (EST-Äquivalente im Header dokumentiert).")
+tzLbma = input.string("Europe/London", "Zeitzone LBMA-Fixes", group = grpTz, tooltip = "LBMA-Fixes hängen an London-Lokalzeit → Europe/London handhabt DST automatisch.")
+
+grpSess = "Session-Fenster"
+sessAsia   = input.session("0000-0600", "Asia Range (Pool)", group = grpSess, tooltip = "Liquiditätspool-Bildung. Kein Trading, nur H/L-Tracking (abschaltbar unten).")
+sessLonKz  = input.session("0700-1000", "London Open Killzone", group = grpSess, tooltip = "Judas-Swing-Fenster, sweept häufig Asia H/L.")
+sessNyPre  = input.session("1200-1330", "NY Pre-Market", group = grpSess)
+sessNyOpen = input.session("1330-1530", "NY Open / Initial Balance", group = grpSess, tooltip = "Wichtigster Block für MNQ/MES: 24,2% aller Tages-Hochs, 26,5% aller Tages-Tiefs (Studie über 12.095 Index-Future-Sessions).")
+sessPm     = input.session("1700-2000", "PM / London Close", group = grpSess, tooltip = "35% aller Tages-Hochs, Peak im letzten 30-min-Fenster (15:30 ET).")
+sessFixAm  = input.session("1015-1045", "LBMA Gold AM-Fix (London-Zeit)", group = grpSess, tooltip = "Fix 10:30 London, Fenster ±15 min. Nur MGC/SIL relevant.")
+sessFixAg  = input.session("1145-1215", "LBMA Silver-Fix (London-Zeit)", group = grpSess, tooltip = "Fix 12:00 London, Fenster ±15 min.")
+sessFixPm  = input.session("1445-1515", "LBMA Gold PM-Fix (London-Zeit)", group = grpSess, tooltip = "Fix 15:00 London, Fenster ±15 min.")
+useLbma    = input.bool(true, "LBMA-Fix-Killzones aktiv", group = grpSess, tooltip = "Für MGC/SIL einschalten, für MNQ/MES ausschalten.")
+use24h     = input.bool(true, "24h-Modus: Rolling-Range-Sweeps", group = grpSess, tooltip = "Erlaubt Sweeps rund um die Uhr gegen eine Rolling-Lookback-Range (für Metalle auf CME Globex). Für MNQ/MES ausschalten → Sweeps nur in Killzones.")
+roll24Len  = input.int(360, "Rolling-Range Lookback (Bars)", minval = 30, group = grpSess, tooltip = "1m-Chart: 360 = 6h. Aktuelle Bar ausgenommen (kein Self-Sweep).")
+blockAsia  = input.bool(true, "Kein Signal während Asia-Fenster", group = grpSess, tooltip = "Asia = Pool-Bildung. Auch im 24h-Modus keine Signale in diesem Fenster.")
+
+grpSweep = "Sweep-Detection"
+minPenTicks = input.int(2, "Min. Penetration (Ticks)", minval = 0, group = grpSweep, tooltip = "Docht muss das Level um mindestens so viele Ticks durchstechen.")
+swpAsia   = input.bool(true, "Asia H/L sweepbar", group = grpSweep)
+swpLondon = input.bool(true, "London-KZ H/L sweepbar", group = grpSweep, tooltip = "Erst nach Ende der London-KZ als Referenz aktiv (typisch: NY sweept London).")
+swpPd     = input.bool(true, "Vortages-H/L sweepbar", group = grpSweep)
+
+grpMss = "MSS / Displacement"
+pivLeft    = input.int(3, "Swing-Pivot links", minval = 1, group = grpMss)
+pivRight   = input.int(1, "Swing-Pivot rechts", minval = 1, group = grpMss, tooltip = "Klein halten (1-2): Swing bestätigt erst nach so vielen Bars — größer = mehr Lag, weniger Repaint-Nähe.")
+mssWindow  = input.int(15, "Max. Bars Sweep → MSS", minval = 1, group = grpMss, tooltip = "MSS muss innerhalb dieses Fensters nach dem Sweep kommen, sonst verfällt der Sweep.")
+dispFactor = input.float(1.5, "Displacement-Faktor (x Ø-Körper)", step = 0.1, minval = 0.5, group = grpMss)
+dispAvgLen = input.int(20, "Ø-Körper-Länge (Bars)", minval = 5, group = grpMss)
+structFilt = input.string("Aus", "Zusatz: Close jenseits Strukturlevel", options = ["Aus", "Asia-Mid", "Tages-Open"], group = grpMss, tooltip = "Displacement-Kerze muss zusätzlich jenseits dieses Levels schließen (long: darüber, short: darunter).")
+
+grpVis = "Visualisierung & Signale"
+showBoxes   = input.bool(true, "Session-Boxen", group = grpVis)
+showLevels  = input.bool(true, "Referenz-Level (Asia/London/PD)", group = grpVis)
+showSweeps  = input.bool(true, "Sweep-Marker", group = grpVis)
+showSwpText = input.bool(false, "Sweep-Level als Text-Label", group = grpVis, tooltip = "Debug: zeigt an jedem Sweep, welches Level gesweept wurde.")
+sigCooldown = input.int(30, "Cooldown zwischen Signalen (Bars)", minval = 0, group = grpVis, tooltip = "Unterdrückt Signal-Cluster. Grob-Selektivität; die Fein-Selektivität (RR-Gate, Expansion-Score) folgt in Session 2.")
+
+// ---------------------------------------------------------------------------
+// MODUL 1: SESSION-ENGINE
+// Generischer Tracker (Muster aus master_session_range.pine, mehrfach
+// instanziierbar): Reset am Fensterstart, Max/Min-Tracking, H/L bleiben nach
+// Fensterende als Referenz stehen bis zum nächsten Start.
+// ---------------------------------------------------------------------------
+f_inSess(string sess, string zone) =>
+    not na(time(timeframe.period, sess, zone))
+
+f_track(bool active) =>
+    var float h    = na
+    var float l    = na
+    var bool  done = false
+    if active and not active[1]
+        h    := high
+        l    := low
+        done := false
+    else if active
+        h := math.max(h, high)
+        l := math.min(l, low)
+    if not active and active[1]
+        done := true
+    [h, l, done]
+
+f_box(bool active, float h, float l, color col, string txt) =>
+    var box b = na
+    if showBoxes
+        if active and not active[1]
+            b := box.new(bar_index, h, bar_index, l, border_color = color.new(col, 40), border_width = 1, bgcolor = color.new(col, 90), text = txt, text_color = color.new(col, 25), text_size = size.tiny, text_halign = text.align_left, text_valign = text.align_top)
+        else if active and not na(b)
+            box.set_right(b, bar_index)
+            box.set_top(b, h)
+            box.set_bottom(b, l)
+
+inAsia   = f_inSess(sessAsia,   tzMain)
+inLonKz  = f_inSess(sessLonKz,  tzMain)
+inNyPre  = f_inSess(sessNyPre,  tzMain)
+inNyOpen = f_inSess(sessNyOpen, tzMain)
+inPm     = f_inSess(sessPm,     tzMain)
+inFixAm  = f_inSess(sessFixAm,  tzLbma)
+inFixAg  = f_inSess(sessFixAg,  tzLbma)
+inFixPm  = f_inSess(sessFixPm,  tzLbma)
+
+[asiaH, asiaL, asiaDone] = f_track(inAsia)
+[lonH,  lonL,  lonDone]  = f_track(inLonKz)
+
+f_box(inAsia,   asiaH, asiaL, color.blue,    "ASIA")
+f_box(inLonKz,  lonH,  lonL,  color.orange,  "LDN KZ")
+[preH,  preL,  preDone]  = f_track(inNyPre)
+[ibH,   ibL,   ibDone]   = f_track(inNyOpen)
+[pmH,   pmL,   pmDone]   = f_track(inPm)
+f_box(inNyPre,  preH, preL, color.gray,    "NY PRE")
+f_box(inNyOpen, ibH,  ibL,  color.green,   "NY IB")
+f_box(inPm,     pmH,  pmL,  color.purple,  "PM/LC")
+[amH,   amL,   amDone]   = f_track(inFixAm)
+[agH,   agL,   agDone]   = f_track(inFixAg)
+[pmxH,  pmxL,  pmxDone]  = f_track(inFixPm)
+f_box(useLbma and inFixAm, amH,  amL,  color.yellow, "AM-FIX")
+f_box(useLbma and inFixAg, agH,  agL,  color.silver, "AG-FIX")
+f_box(useLbma and inFixPm, pmxH, pmxL, color.yellow, "PM-FIX")
+
+// Killzone = Fenster, in denen Signale erlaubt sind (Asia bewusst NICHT dabei)
+inKz = inLonKz or inNyPre or inNyOpen or inPm or (useLbma and (inFixAm or inFixAg or inFixPm))
+// Sweep-/Signal-Erlaubnis: Killzone ODER 24h-Modus; Asia optional gesperrt
+windowOk = (inKz or use24h) and not (blockAsia and inAsia)
+
+// ---------------------------------------------------------------------------
+// REFERENZ-LEVEL AUSSERHALB DER SESSIONS
+// ---------------------------------------------------------------------------
+// Vortages-H/L: [1] = letzter ABGESCHLOSSENER Tag (kein Lookahead/Repaint)
+pdH = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_off)
+pdL = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_off)
+
+// Tages-Open (für Struktur-Filter)
+var float dayOpen = na
+if ta.change(time("D")) != 0
+    dayOpen := open
+
+// Rolling-24h-Range (aktuelle Bar via [1] ausgenommen)
+rollH = ta.highest(high, roll24Len)[1]
+rollL = ta.lowest(low,  roll24Len)[1]
+
+// ---------------------------------------------------------------------------
+// MODUL 2: SWEEP-DETECTION
+// Kernbedingung wie in master_session_range.pine (Docht durch Level, Close
+// zurück), erweitert um Min-Penetration und mehrere Referenz-Level.
+// ---------------------------------------------------------------------------
+pen = minPenTicks * syminfo.mintick
+f_sweepBull(float lvl, bool valid) =>   // Tiefs gesweept → Long-Kontext
+    valid and not na(lvl) and low <= lvl - pen and close > lvl
+f_sweepBear(float lvl, bool valid) =>   // Hochs gesweept → Short-Kontext
+    valid and not na(lvl) and high >= lvl + pen and close < lvl
+
+swpBullAsia = f_sweepBull(asiaL, swpAsia and asiaDone)
+swpBearAsia = f_sweepBear(asiaH, swpAsia and asiaDone)
+swpBullLon  = f_sweepBull(lonL,  swpLondon and lonDone)
+swpBearLon  = f_sweepBear(lonH,  swpLondon and lonDone)
+swpBullPd   = f_sweepBull(pdL,   swpPd)
+swpBearPd   = f_sweepBear(pdH,   swpPd)
+swpBullRoll = use24h and not inKz and f_sweepBull(rollL, true)
+swpBearRoll = use24h and not inKz and f_sweepBear(rollH, true)
+
+// Quelle des Sweeps bestimmen (Priorität: Session-Level vor Rolling)
+bool   bullSweepNow = false
+string bullSrcNow   = na
+if windowOk
+    if swpBullAsia
+        bullSweepNow := true
+        bullSrcNow := "Asia-Low"
+    else if swpBullLon
+        bullSweepNow := true
+        bullSrcNow := "London-Low"
+    else if swpBullPd
+        bullSweepNow := true
+        bullSrcNow := "PD-Low"
+    else if swpBullRoll
+        bullSweepNow := true
+        bullSrcNow := "Roll-24h-Low"
+
+bool   bearSweepNow = false
+string bearSrcNow   = na
+if windowOk
+    if swpBearAsia
+        bearSweepNow := true
+        bearSrcNow := "Asia-High"
+    else if swpBearLon
+        bearSweepNow := true
+        bearSrcNow := "London-High"
+    else if swpBearPd
+        bearSweepNow := true
+        bearSrcNow := "PD-High"
+    else if swpBearRoll
+        bearSweepNow := true
+        bearSrcNow := "Roll-24h-High"
+
+// ---------------------------------------------------------------------------
+// MODUL 3: MSS + DISPLACEMENT
+// ---------------------------------------------------------------------------
+// Letzte bestätigte Swing-Punkte (Gegenstruktur für den Shift)
+ph = ta.pivothigh(pivLeft, pivRight)
+pl = ta.pivotlow(pivLeft, pivRight)
+var float lastSwingH = na
+var float lastSwingL = na
+if not na(ph)
+    lastSwingH := ph
+if not na(pl)
+    lastSwingL := pl
+
+// Displacement: Körper > Faktor x Ø-Körper, optional Close jenseits Struktur
+body    = math.abs(close - open)
+avgBody = ta.sma(body, dispAvgLen)
+asiaMid = (asiaH + asiaL) / 2
+structRef = structFilt == "Asia-Mid" ? asiaMid : structFilt == "Tages-Open" ? dayOpen : na
+dispLong  = body > dispFactor * avgBody and close > open and (structFilt == "Aus" or (not na(structRef) and close > structRef))
+dispShort = body > dispFactor * avgBody and close < open and (structFilt == "Aus" or (not na(structRef) and close < structRef))
+
+// State-Machine: Sweep merken (inkl. Wick für den späteren Stop), innerhalb
+// mssWindow auf MSS+Displacement warten, sonst verfallen lassen.
+var int    bullSwpBar  = na
+var float  bullSwpWick = na
+var string bullSwpSrc  = na
+var int    bearSwpBar  = na
+var float  bearSwpWick = na
+var string bearSwpSrc  = na
+var int    lastSigBar  = na
+
+if barstate.isconfirmed
+    if bullSweepNow
+        bullSwpBar  := bar_index
+        bullSwpWick := low
+        bullSwpSrc  := bullSrcNow
+    if bearSweepNow
+        bearSwpBar  := bar_index
+        bearSwpWick := high
+        bearSwpSrc  := bearSrcNow
+    if not na(bullSwpBar) and bar_index - bullSwpBar > mssWindow
+        bullSwpBar := na
+    if not na(bearSwpBar) and bar_index - bearSwpBar > mssWindow
+        bearSwpBar := na
+
+// MSS: Close jenseits des letzten Gegen-Swings, mit Displacement-Kerze
+cooldownOk = na(lastSigBar) or bar_index - lastSigBar >= sigCooldown
+mssBull = not na(bullSwpBar) and not na(lastSwingH) and close > lastSwingH and dispLong
+mssBear = not na(bearSwpBar) and not na(lastSwingL) and close < lastSwingL and dispShort
+
+longSignal  = barstate.isconfirmed and windowOk and cooldownOk and mssBull
+shortSignal = barstate.isconfirmed and windowOk and cooldownOk and mssBear
+
+if longSignal
+    label.new(bar_index, low, "SNIPE LONG\n" + bullSwpSrc + "\nWick " + str.tostring(bullSwpWick, format.mintick), style = label.style_label_up, color = color.new(color.lime, 10), textcolor = color.black, size = size.small)
+    lastSigBar := bar_index
+    bullSwpBar := na
+if shortSignal
+    label.new(bar_index, high, "SNIPE SHORT\n" + bearSwpSrc + "\nWick " + str.tostring(bearSwpWick, format.mintick), style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
+    lastSigBar := bar_index
+    bearSwpBar := na
+
+// ---------------------------------------------------------------------------
+// VISUALS
+// ---------------------------------------------------------------------------
+plot(showLevels and asiaDone ? asiaH : na, "Asia High", color.new(color.blue, 35), 1, plot.style_linebr)
+plot(showLevels and asiaDone ? asiaL : na, "Asia Low",  color.new(color.blue, 35), 1, plot.style_linebr)
+plot(showLevels and lonDone ? lonH : na, "London High", color.new(color.orange, 45), 1, plot.style_linebr)
+plot(showLevels and lonDone ? lonL : na, "London Low",  color.new(color.orange, 45), 1, plot.style_linebr)
+plot(showLevels ? pdH : na, "Vortages-High", color.new(color.teal, 40), 1, plot.style_linebr)
+plot(showLevels ? pdL : na, "Vortages-Low",  color.new(color.teal, 40), 1, plot.style_linebr)
+
+plotshape(showSweeps and bullSweepNow and barstate.isconfirmed, "Bull-Sweep", shape.triangleup,   location.belowbar, color.new(color.aqua, 0),    size = size.tiny, text = "swp")
+plotshape(showSweeps and bearSweepNow and barstate.isconfirmed, "Bear-Sweep", shape.triangledown, location.abovebar, color.new(color.fuchsia, 0), size = size.tiny, text = "swp")
+
+if showSwpText and barstate.isconfirmed
+    if bullSweepNow
+        label.new(bar_index, low, bullSrcNow, style = label.style_none, textcolor = color.new(color.aqua, 20), size = size.tiny)
+    if bearSweepNow
+        label.new(bar_index, high, bearSrcNow, style = label.style_none, textcolor = color.new(color.fuchsia, 20), size = size.tiny)
+
+// ---------------------------------------------------------------------------
+// ALERTS (Basis — finale Signal-Alerts mit Entry/SL/TP folgen in Session 2)
+// ---------------------------------------------------------------------------
+alertcondition(longSignal,  "Snipe LONG",  "Snipe Points: bullischer Sweep + MSS/Displacement (Long-Kandidat)")
+alertcondition(shortSignal, "Snipe SHORT", "Snipe Points: bärischer Sweep + MSS/Displacement (Short-Kandidat)")
+alertcondition(bullSweepNow and barstate.isconfirmed, "Bull-Sweep (früh)", "Snipe Points: bullischer Liquidity-Sweep erkannt — auf MSS warten")
+alertcondition(bearSweepNow and barstate.isconfirmed, "Bear-Sweep (früh)", "Snipe Points: bärischer Liquidity-Sweep erkannt — auf MSS warten")
+
+// =============================================================================
+//  SESSION-2-STUBS (geplante Module, Reihenfolge lt. Arbeitsplan)
+//  [6]  Stop/Target-Engine: Wick+Ticks | ATR(1m,n)*k | FVG-Rand (Dropdown)
+//  [7]  RR-Gate: Signal nur wenn RR zum Ziel (Gegenseite Range / PD-Extrem)
+//       >= Mindest-RR (Input, Default 5) — Opposite-Sides-Regel (73-77%)
+//  [8]  Range-Expansion-Score: ATR-Regime-Perzentil (60d), Narrow-IB,
+//       Overnight-Range vs. ADR, Inside-Day — gewichteter Score, Cutoff-Input
+//  [9]  Optional: SMT (MNQ↔MES, MGC↔SIL; request.security, lookahead_off,
+//       confirmed-only), VWAP-Rejection, Kalender-Filter (Datumsliste-Input)
+//  [10] Turtle Soup: N-Tage-Extrem (Daily, N=20) Fehlausbruch, separates Modul
+//  [11] Entry/SL/TP-Linien + Labels, finale Alert-Messages
+// =============================================================================

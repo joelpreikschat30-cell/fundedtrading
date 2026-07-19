@@ -8,6 +8,15 @@ Action, VWAP als einziger optionaler Konfluenz-Filter.
 
 ➡️ **Ergebnisse & Einschätzung: [REPORT.md](REPORT.md)**
 
+## NEU: Snipe-Points-Indikator (`indicators/snipe_points.pine`)
+
+Pine-v6-**Indikator** (nicht Strategie) für seltene, hoch-asymmetrische
+1m-Reversal-Setups auf MGC/SIL/MNQ/MES: Multi-Session-Engine (Asia, London-KZ,
+NY-Pre, NY-IB, PM/London-Close + 3 LBMA-Fix-Fenster), Liquidity-Sweep-Detection
+(Asia/London/Vortages-H-L/Rolling-24h), MSS + Displacement-Filter, Alerts.
+Session-1-Build — Stop/Target-Engine, RR-Gate (min. 1:5), Expansion-Score, SMT,
+Turtle Soup folgen. Repo-Abgleich & Modulplan: [docs/SNIPE_ANALYSE.md](docs/SNIPE_ANALYSE.md)
+
 ## Die Strategie (`strategies/master_session_range.pine`)
 
 Ein Framework, zwei dokumentierte Price-Action-Edges per Modus-Schalter:
