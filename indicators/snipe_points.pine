@@ -69,6 +69,7 @@ mssWindow  = input.int(15, "Max. Bars Sweep → MSS", minval = 1, group = grpMss
 dispFactor = input.float(1.5, "Displacement-Faktor (x Ø-Körper)", step = 0.1, minval = 0.5, group = grpMss)
 dispAvgLen = input.int(20, "Ø-Körper-Länge (Bars)", minval = 5, group = grpMss)
 structFilt = input.string("Aus", "Zusatz: Close jenseits Strukturlevel", options = ["Aus", "Asia-Mid", "Tages-Open"], group = grpMss)
+entryMode  = input.string("Sweep+Displacement", "Entry-Timing", options = ["Sweep-Reclaim (früh)", "Sweep+Displacement", "MSS-bestätigt (spät)"], group = grpMss, tooltip = "Früher Entry = näher am Reversal-Wick, engerer Stop, höheres RR — aber mehr Fehl-Sweeps.\n• Sweep-Reclaim: sofort auf der Sweep-Kerze (früheste, aggressivste).\n• Sweep+Displacement: Sweep-Kerze MUSS starke Rejection zeigen (Körper > Faktor) — früh + Qualitätsfilter.\n• MSS-bestätigt: erst nach Struktur-Shift (spät, aber bestätigt). MSS-/Swing-Inputs gelten nur hier.")
 
 grpStop = "Stop / Target / RR-Gate"
 stopMode   = input.string("Wick", "Stop-Methode", options = ["Wick", "ATR", "FVG"], group = grpStop, tooltip = "Wick: X Ticks hinter Sweep-Docht. ATR: ATR(1m,n)*k. FVG: Rand des Displacement-FVG (Fallback Wick).")
@@ -119,7 +120,7 @@ tsRR      = input.float(3.0, "Turtle-RR-Ziel", step = 0.5, minval = 1.0, group =
 grpVis = "Visualisierung & Signale"
 showBoxes   = input.bool(true, "Session-Boxen", group = grpVis)
 showLevels  = input.bool(true, "Referenz-Level", group = grpVis)
-showSweeps  = input.bool(true, "Sweep-Marker", group = grpVis)
+showSweeps  = input.bool(false, "Sweep-Marker (alle Sweeps, nicht nur Signale)", group = grpVis, tooltip = "Default aus — jeder Sweep setzt ein Dreieck und überlädt den Chart. Nur zum Debuggen einschalten. Die eigentlichen Signale (Labels + Linien) sind davon unabhängig.")
 showSwpText = input.bool(false, "Sweep-Level als Text-Label", group = grpVis)
 drawTrades  = input.bool(true, "Entry/SL/TP-Linien zeichnen", group = grpVis)
 drawLen     = input.int(40, "Linienlänge (Bars nach rechts)", minval = 5, group = grpVis)
@@ -340,13 +341,22 @@ tick = syminfo.mintick
 bullFvg = low  > high[2]          // Displacement-Kerze reisst Gap auf (bullisch)
 bearFvg = high < low[2]
 
+// Früh-Modi (Sweep-Reclaim / Sweep+Displacement) rechnen mit der AKTUELLEN
+// Sweep-Kerze (Wick = low/high, Ziel = bullOppNow/bearOppNow). MSS-Modus nutzt
+// die im State gespeicherten Werte des ursprünglichen Sweeps.
+isEarly = entryMode != "MSS-bestätigt (spät)"
+lWickRef = isEarly ? low  : bullSwpWick
+lOppRef  = isEarly ? bullOppNow : bullSwpOpp
+sWickRef = isEarly ? high : bearSwpWick
+sOppRef  = isEarly ? bearOppNow : bearSwpOpp
+
 // Long-Kandidat
 lEntry = close
-lSlWick = bullSwpWick - wickTicks * tick
+lSlWick = lWickRef - wickTicks * tick
 lSlAtr  = close - atrStopK * atrStop
 lSlFvg  = bullFvg ? high[2] - fvgBufTicks * tick : lSlWick   // Fallback Wick
 lSL     = stopMode == "ATR" ? lSlAtr : stopMode == "FVG" ? lSlFvg : lSlWick
-lTP     = targetMode == "Vortages-Extrem" ? pdH : bullSwpOpp
+lTP     = targetMode == "Vortages-Extrem" ? pdH : lOppRef
 lTP    := na(lTP) ? pdH : lTP
 lRisk   = lEntry - lSL
 lRR     = (lRisk > 0 and not na(lTP) and lTP > lEntry) ? (lTP - lEntry) / lRisk : na
@@ -354,11 +364,11 @@ lRrOk   = not useRrGate or (not na(lRR) and lRR >= minRR)
 
 // Short-Kandidat
 sEntry = close
-sSlWick = bearSwpWick + wickTicks * tick
+sSlWick = sWickRef + wickTicks * tick
 sSlAtr  = close + atrStopK * atrStop
 sSlFvg  = bearFvg ? low[2] + fvgBufTicks * tick : sSlWick
 sSL     = stopMode == "ATR" ? sSlAtr : stopMode == "FVG" ? sSlFvg : sSlWick
-sTP     = targetMode == "Vortages-Extrem" ? pdL : bearSwpOpp
+sTP     = targetMode == "Vortages-Extrem" ? pdL : sOppRef
 sTP    := na(sTP) ? pdL : sTP
 sRisk   = sSL - sEntry
 sRR     = (sRisk > 0 and not na(sTP) and sTP < sEntry) ? (sEntry - sTP) / sRisk : na
@@ -417,9 +427,15 @@ calBlocked = useCal and (calMode == "Blocken" ? isListed : not isListed)
 // FINALE SNIPE-SIGNALE  (Kandidat AND alle Gates)
 // ===========================================================================
 cooldownOk = na(lastSigBar) or bar_index - lastSigBar >= sigCooldown
+// Kandidat je nach Entry-Timing
+longRaw  = entryMode == "Sweep-Reclaim (früh)" ? bullSweepNow : entryMode == "Sweep+Displacement" ? (bullSweepNow and dispLong) : mssBull
+shortRaw = entryMode == "Sweep-Reclaim (früh)" ? bearSweepNow : entryMode == "Sweep+Displacement" ? (bearSweepNow and dispShort) : mssBear
+// Quelle für Label (Früh-Modus: aktueller Sweep; MSS: gespeicherter Sweep)
+lSrcRef = isEarly ? bullSrcNow : bullSwpSrc
+sSrcRef = isEarly ? bearSrcNow : bearSwpSrc
 gateCommon = barstate.isconfirmed and windowOk and cooldownOk and scoreOk and not calBlocked
-longSignal  = gateCommon and mssBull and lRrOk and bullSmt and bullVwapRej
-shortSignal = gateCommon and mssBear and sRrOk and bearSmt and bearVwapRej
+longSignal  = gateCommon and longRaw  and lRrOk and bullSmt and bullVwapRej
+shortSignal = gateCommon and shortRaw and sRrOk and bearSmt and bearVwapRej
 
 f_drawTrade(float e, float sl, float tp, bool isLong) =>
     if drawTrades
@@ -431,13 +447,13 @@ f_drawTrade(float e, float sl, float tp, bool isLong) =>
 var int longCount  = 0
 var int shortCount = 0
 if longSignal
-    label.new(bar_index, low, "SNIPE LONG\n" + bullSwpSrc + "\nRR " + str.tostring(lRR, "#.#") + "  Score " + str.tostring(score, "#.##"), style = label.style_label_up, color = color.new(color.lime, 10), textcolor = color.black, size = size.small)
+    label.new(bar_index, low, "SNIPE LONG\n" + lSrcRef + "\nRR " + str.tostring(lRR, "#.#") + "  Score " + str.tostring(score, "#.##"), style = label.style_label_up, color = color.new(color.lime, 10), textcolor = color.black, size = size.small)
     f_drawTrade(lEntry, lSL, lTP, true)
     lastSigBar := bar_index
     bullSwpBar := na
     longCount  += 1
 if shortSignal
-    label.new(bar_index, high, "SNIPE SHORT\n" + bearSwpSrc + "\nRR " + str.tostring(sRR, "#.#") + "  Score " + str.tostring(score, "#.##"), style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
+    label.new(bar_index, high, "SNIPE SHORT\n" + sSrcRef + "\nRR " + str.tostring(sRR, "#.#") + "  Score " + str.tostring(score, "#.##"), style = label.style_label_down, color = color.new(color.red, 10), textcolor = color.white, size = size.small)
     f_drawTrade(sEntry, sSL, sTP, false)
     lastSigBar := bar_index
     bearSwpBar := na

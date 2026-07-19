@@ -67,6 +67,7 @@ python3 summarize.py       # kompakte Konsolen-Übersicht
 | `run_master.py` | 8-Test-Suite: IS/OOS, Walk-Forward, Sensitivität, Monte Carlo, Kosten-Stress, Regime, Wilson-CI, Prop-Compliance |
 | `engine.py` | Wiederverwendete Analytik (Metriken, Monte Carlo, Wilson) |
 | `results/master_results.json` | Vollständige Roh-Ergebnisse |
+| `reversal_timing.py` | **Timing-Analyse für den Snipe-Indikator:** findet auf echten 1m-Daten, WANN (Stunde/Session/Referenz-Level) die häufigsten und hochwertigsten Sweep-Reversals entstehen — Kalibriergrundlage für Session-Toggles, Penetration und RR-Gate pro Symbol. Bsp: `python3 reversal_timing.py XAGUSD --target 5` |
 
 **Daten:** echte XAUUSD- und NAS100-CFD-Bars von Dukascopy. Der NAS100-CFD ist
 eine sehr enge Näherung an NQ/MNQ (Index vs. Future — minimale Spec-Unterschiede);
