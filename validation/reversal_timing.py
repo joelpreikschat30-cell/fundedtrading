@@ -148,8 +148,21 @@ def session_of(minute: int) -> str:
     return "Off-Session"
 
 
-def detect(sym, pen, buf, lookfwd, target, cooldown, level_names):
-    arr = load_1m(sym)
+_LOADED: dict = {}
+
+
+def _bars(sym):
+    if sym not in _LOADED:
+        arr = load_1m(sym)
+        _LOADED[sym] = arr
+    return _LOADED[sym]
+
+
+def detect(sym, pen, buf, lookfwd, cooldown, level_names):
+    """Erkennt Sweep-Reversal-Events. TARGET-UNABHÄNGIG: pro Event wird die
+    maximal erreichte R-Ausdehnung VOR dem Stop gemessen (r_max), sodass jede
+    Ziel-RR nachträglich als Schwelle (r_max >= target) anwendbar ist."""
+    arr = _bars(sym)
     em = arr[:, 0].astype(np.int64)
     o, h, l, c = arr[:, 1], arr[:, 2], arr[:, 3], arr[:, 4]
     mod = (em % 1440).astype(np.int64)
@@ -159,7 +172,6 @@ def detect(sym, pen, buf, lookfwd, target, cooldown, level_names):
 
     events = []
     last_ev = -10**9
-    # Bar-für-Bar, damit Forward-Sim + Cooldown sauber path-abhängig sind.
     for i in range(1, n - 1):
         if i - last_ev < cooldown:
             continue
@@ -177,55 +189,52 @@ def detect(sym, pen, buf, lookfwd, target, cooldown, level_names):
                 continue
 
             entry = c[i]
+            end = min(i + 1 + lookfwd, n)
             if side == "long":
                 stop = l[i] - buf
                 risk = entry - stop
                 if risk <= 0:
                     continue
-                hi_fwd = -np.inf; outcome = -1
-                for k in range(i + 1, min(i + 1 + lookfwd, n)):
-                    hi_fwd = max(hi_fwd, h[k])
-                    if l[k] <= stop:
-                        outcome = 0; break
-                    if h[k] >= entry + target * risk:
-                        outcome = 1; break
-                mfe = (hi_fwd - entry) if hi_fwd > -np.inf else 0.0
+                r_max = 0.0; stopped = 0
+                for k in range(i + 1, end):
+                    if l[k] <= stop:                      # Stop zuerst prüfen (konservativ)
+                        stopped = 1; break
+                    r_here = (h[k] - entry) / risk
+                    if r_here > r_max:
+                        r_max = r_here
             else:
                 stop = h[i] + buf
                 risk = stop - entry
                 if risk <= 0:
                     continue
-                lo_fwd = np.inf; outcome = -1
-                for k in range(i + 1, min(i + 1 + lookfwd, n)):
-                    lo_fwd = min(lo_fwd, l[k])
+                r_max = 0.0; stopped = 0
+                for k in range(i + 1, end):
                     if h[k] >= stop:
-                        outcome = 0; break
-                    if l[k] <= entry - target * risk:
-                        outcome = 1; break
-                mfe = (entry - lo_fwd) if lo_fwd < np.inf else 0.0
+                        stopped = 1; break
+                    r_here = (entry - l[k]) / risk
+                    if r_here > r_max:
+                        r_max = r_here
 
             events.append(dict(
                 i=i, hod=int(hod[i]), minute=int(mod[i]), side=side,
                 level=name, session=session_of(int(mod[i])),
-                risk=float(risk), mfe_rr=float(mfe / risk),
-                hit_target=1 if outcome == 1 else 0,
-                stopped=1 if outcome == 0 else 0))
+                risk=float(risk), r_max=float(r_max), stopped=stopped))
             last_ev = i
             break   # ein Event je Bar (erstes zutreffendes Level)
     return events
 
 
-def agg(events, key):
-    """Aggregiert Events nach key -> Zeilen (bucket, n, hitrate, median-RR, ...)."""
+def agg(events, key, target):
+    """Aggregiert Events nach key. Ziel-Hit = r_max >= target."""
     buckets: dict = {}
     for e in events:
         buckets.setdefault(e[key], []).append(e)
     rows = []
     for b, ev in buckets.items():
-        rr = np.array([x["mfe_rr"] for x in ev])
+        rr = np.array([x["r_max"] for x in ev])
         rows.append(dict(
             bucket=b, n=len(ev),
-            hit_rate=round(100 * np.mean([x["hit_target"] for x in ev]), 1),
+            hit_rate=round(100 * np.mean(rr >= target), 1),
             stop_rate=round(100 * np.mean([x["stopped"] for x in ev]), 1),
             median_rr=round(float(np.median(rr)), 2),
             p75_rr=round(float(np.percentile(rr, 75)), 2),
@@ -246,6 +255,45 @@ def ptable(title, rows, sort_key, top=None):
         print(f"  {str(r['bucket']):<14}{r['n']:>6}{r['share']:>7}%{r['hit_rate']:>9}%{r['stop_rate']:>7}%{r['median_rr']:>11}{r['p75_rr']:>9}")
 
 
+def _flist(s):
+    return [float(x) for x in str(s).split(",") if x.strip() != ""]
+
+
+def run_grid(sym, pen_list, target_list, buf_fixed, lookfwd, cooldown, level_names):
+    """Matrix über pen (Detektion) × target (Bewertung). events pro pen einmal."""
+    print("\nGRID  (pro pen einmal erkannt; Ziel-RR nur als Schwelle auf r_max)")
+    hdr = f"  {'pen':>6}{'buf':>7}{'events':>8}{'med-RR':>8}{'p75-RR':>8}{'stop%':>7}"
+    hdr += "".join([f"{'Hit@'+str(t):>9}" for t in target_list])
+    print(hdr)
+    grid = []
+    for pen in pen_list:
+        buf = pen if buf_fixed is None else buf_fixed
+        ev = detect(sym, pen, buf, lookfwd, cooldown, level_names)
+        n = len(ev)
+        if n == 0:
+            print(f"  {pen:>6}{buf:>7}{0:>8}{'-':>8}{'-':>8}{'-':>7}")
+            grid.append(dict(pen=pen, buf=buf, events=0))
+            continue
+        rr = np.array([e["r_max"] for e in ev])
+        med = float(np.median(rr)); p75 = float(np.percentile(rr, 75))
+        stopr = 100 * np.mean([e["stopped"] for e in ev])
+        hits = {t: round(100 * float(np.mean(rr >= t)), 1) for t in target_list}
+        row = f"  {pen:>6}{buf:>7}{n:>8}{med:>8.2f}{p75:>8.2f}{stopr:>6.0f}%"
+        row += "".join([f"{hits[t]:>8}%" for t in target_list])
+        print(row)
+        grid.append(dict(pen=pen, buf=buf, events=n, median_rr=round(med, 2),
+                         p75_rr=round(p75, 2), stop_rate=round(stopr, 1),
+                         hit_rate=hits))
+    out = OUT / f"reversal_grid_{sym}.json"
+    out.write_text(json.dumps(dict(sym=sym, pen_grid=pen_list,
+                   target_grid=target_list, grid=grid), indent=2))
+    print(f"\n→ Grid-Details: {out}")
+    print("\nLesehilfe: 'events' = Signalzahl (fällt mit größerer pen), "
+          "'Hit@T' = % der Events, die vor dem Stop >= T·R erreichten.\n"
+          "Für ~1 Signal/Woche/Symbol: pen so wählen, dass events/Zeitraum passt, "
+          "und ein target, dessen Hit@T noch tragbar ist.")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("sym")
@@ -256,41 +304,53 @@ def main():
     ap.add_argument("--cooldown", type=int, default=30, help="Min. Bars zwischen Events.")
     ap.add_argument("--roll", type=int, default=360, help="Rolling-Range-Lookback (Bars).")
     ap.add_argument("--levels", type=str, default="PD,ROLL,ASIA,LON", help="Referenz-Level: PD,ROLL,ASIA,LON (Komma).")
+    ap.add_argument("--pen-grid", type=str, default="", help="Grid-Modus: pen-Werte, z.B. 0,5,10,15,20,25")
+    ap.add_argument("--target-grid", type=str, default="", help="Grid-Modus: target-RR-Werte, z.B. 3,5,8,10")
     a = ap.parse_args()
 
-    buf = a.pen if a.buf is None else a.buf
     level_names = [x.strip().upper() for x in a.levels.split(",") if x.strip()]
     build_levels.roll_n = a.roll
 
     print(f"== Reversal-Timing {a.sym} ==")
+
+    # ---- Grid-Modus ----
+    if a.pen_grid or a.target_grid:
+        pen_list = _flist(a.pen_grid) if a.pen_grid else [a.pen]
+        target_list = _flist(a.target_grid) if a.target_grid else [a.target]
+        print(f"lookfwd={a.lookfwd}  cooldown={a.cooldown}  roll={a.roll}  levels={level_names}")
+        run_grid(a.sym, pen_list, target_list, a.buf, a.lookfwd, a.cooldown, level_names)
+        return
+
+    # ---- Einzel-Lauf mit voller Aufschlüsselung ----
+    buf = a.pen if a.buf is None else a.buf
     print(f"pen={a.pen}  buf={buf}  lookfwd={a.lookfwd}  target-RR={a.target}  "
           f"cooldown={a.cooldown}  roll={a.roll}  levels={level_names}")
 
-    events = detect(a.sym, a.pen, buf, a.lookfwd, a.target, a.cooldown, level_names)
+    events = detect(a.sym, a.pen, buf, a.lookfwd, a.cooldown, level_names)
     if not events:
         print("Keine Events erkannt — Penetration/Level prüfen.")
         return
 
     n = len(events)
-    hit = np.mean([e["hit_target"] for e in events])
-    med = np.median([e["mfe_rr"] for e in events])
+    hit = np.mean([e["r_max"] >= a.target for e in events])
+    med = np.median([e["r_max"] for e in events])
     print(f"\nGesamt: {n} Reversal-Events | Ziel-RR>={a.target} erreicht: {100*hit:.1f}% "
-          f"| Median-MFE-RR: {med:.2f}")
+          f"| Median-max-RR: {med:.2f}")
 
-    by_hour = agg(events, "hod")
+    by_hour = agg(events, "hod", a.target)
     ptable("Nach UTC-Stunde (Top nach Häufigkeit):", by_hour, "n")
     ptable("Nach UTC-Stunde (Top nach Ziel-Hit-Rate, min. 10 Events):",
            [r for r in by_hour if r["n"] >= 10], "hit_rate")
-    ptable("Nach Session:", agg(events, "session"), "n")
-    ptable("Nach Referenz-Level:", agg(events, "level"), "n")
-    ptable("Nach Richtung:", agg(events, "side"), "n")
+    ptable("Nach Session:", agg(events, "session", a.target), "n")
+    ptable("Nach Referenz-Level:", agg(events, "level", a.target), "n")
+    ptable("Nach Richtung:", agg(events, "side", a.target), "n")
 
     out = OUT / f"reversal_timing_{a.sym}.json"
     out.write_text(json.dumps(dict(
         sym=a.sym, params=vars(a), total=n,
-        hit_rate=round(100 * hit, 1), median_rr=round(float(med), 2),
-        by_hour=by_hour, by_session=agg(events, "session"),
-        by_level=agg(events, "level"), by_side=agg(events, "side")),
+        hit_rate=round(100 * float(hit), 1), median_rr=round(float(med), 2),
+        by_hour=by_hour, by_session=agg(events, "session", a.target),
+        by_level=agg(events, "level", a.target), by_side=agg(events, "side", a.target)),
         indent=2))
     print(f"\n→ Details: {out}")
 
