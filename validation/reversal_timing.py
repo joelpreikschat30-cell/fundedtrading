@@ -267,7 +267,7 @@ def run_grid(sym, pen_list, target_list, buf_fixed, lookfwd, cooldown, level_nam
     print(hdr)
     grid = []
     for pen in pen_list:
-        buf = pen if buf_fixed is None else buf_fixed
+        buf = 0.0 if buf_fixed is None else buf_fixed   # Stop am Wick; pen nur für Detektion
         ev = detect(sym, pen, buf, lookfwd, cooldown, level_names)
         n = len(ev)
         if n == 0:
@@ -298,7 +298,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("sym")
     ap.add_argument("--pen", type=float, default=0.0, help="Min-Penetration in PREIS-Einheiten (Docht über Level). 0 = jeder Durchstich.")
-    ap.add_argument("--buf", type=float, default=None, help="Stop-Puffer hinter dem Wick (Preis). Default = --pen.")
+    ap.add_argument("--buf", type=float, default=None, help="Stop-Puffer hinter dem Wick (Preis). Default 0 = Stop exakt am Wick (pen wirkt NUR auf die Detektion, nicht auf die Stop-Distanz).")
     ap.add_argument("--lookfwd", type=int, default=120, help="Forward-Fenster in Bars (1m) für RR-Messung.")
     ap.add_argument("--target", type=float, default=5.0, help="Ziel-RR für die Hit-Rate (Default 5).")
     ap.add_argument("--cooldown", type=int, default=30, help="Min. Bars zwischen Events.")
@@ -322,7 +322,7 @@ def main():
         return
 
     # ---- Einzel-Lauf mit voller Aufschlüsselung ----
-    buf = a.pen if a.buf is None else a.buf
+    buf = 0.0 if a.buf is None else a.buf   # Stop am Wick; pen nur für Detektion
     print(f"pen={a.pen}  buf={buf}  lookfwd={a.lookfwd}  target-RR={a.target}  "
           f"cooldown={a.cooldown}  roll={a.roll}  levels={level_names}")
 
