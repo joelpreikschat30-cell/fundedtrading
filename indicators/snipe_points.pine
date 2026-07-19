@@ -110,6 +110,7 @@ f_box(bool active, float h, float l, color col, string txt) =>
             box.set_right(b, bar_index)
             box.set_top(b, h)
             box.set_bottom(b, l)
+    b   // finale Zeile: if-Blöcke sind reine Statements (Seiteneffekt), Funktion gibt konsistent box zurück
 
 inAsia   = f_inSess(sessAsia,   tzMain)
 inLonKz  = f_inSess(sessLonKz,  tzMain)
